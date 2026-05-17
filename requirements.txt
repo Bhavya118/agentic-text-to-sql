@@ -1,0 +1,18 @@
+# Core
+duckdb==0.10.3
+openai==1.30.1
+python-dotenv==1.0.1
+
+# Agentic framework
+langgraph==0.1.19
+langchain==0.2.1
+langchain-openai==0.1.8
+
+# Data handling
+pandas==2.2.2
+numpy==1.26.4
+
+# Utilities
+tqdm==4.66.4
+tenacity==8.3.0
+rich==13.7.1
