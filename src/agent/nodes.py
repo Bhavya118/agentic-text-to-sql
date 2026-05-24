@@ -1,12 +1,31 @@
 import json
+import time
 import sqlite3
 import duckdb
 from pathlib import Path
-from google import genai
+from groq import Groq
 from config import GEMINI_API_KEY, LLM_MODEL, SEMANTIC_DIR, MAX_CORRECTIONS
 from src.agent.state import AgentState
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = Groq(api_key=GEMINI_API_KEY)
+
+
+def call_llm(prompt: str, retries: int = 5, wait: int = 15) -> str:
+    """Call Groq with automatic retry on errors."""
+    for attempt in range(retries):
+        try:
+            response = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            if any(code in str(e) for code in ["429", "503", "UNAVAILABLE", "rate_limit"]):
+                print(f"\n  API busy, waiting {wait}s (attempt {attempt+1}/{retries})...")
+                time.sleep(wait)
+            else:
+                raise
+    raise Exception("Groq failed after all retries")
 
 
 # ── Node A — Context Retrieval ────────────────────────────────────────────────
@@ -19,12 +38,10 @@ def node_context_retrieval(state: AgentState) -> AgentState:
     db_name  = state["db_name"]
     question = state["question"]
 
-    # Load semantic context from disk
     context_path = SEMANTIC_DIR / f"{db_name}_semantic_context.json"
     with open(context_path, "r", encoding="utf-8") as f:
         semantic_context = json.load(f)
 
-    # Format the semantic context for the prompt
     tables_text = []
     for table in semantic_context["tables"]:
         col_lines = []
@@ -60,12 +77,8 @@ Format your response as a concise context block that will be passed to a SQL gen
 Include table names, relevant column names, their descriptions, and any relevant join paths.
 Be specific and complete — do not omit columns needed for joins or filters."""
 
-    response = client.models.generate_content(
-        model=LLM_MODEL,
-        contents=prompt
-    )
-
-    return {**state, "retrieved_context": response.text.strip()}
+    response_text = call_llm(prompt)
+    return {**state, "retrieved_context": response_text}
 
 
 # ── Node B — SQL Generator ────────────────────────────────────────────────────
@@ -101,12 +114,9 @@ Relevant schema context:
 Write a single valid SQLite SQL query that answers the question.
 Return ONLY the SQL query. No explanation, no markdown, no backticks."""
 
-    response = client.models.generate_content(
-        model=LLM_MODEL,
-        contents=prompt
-    )
+    response_text = call_llm(prompt)
 
-    sql = response.text.strip()
+    sql = response_text
     if sql.startswith("```"):
         sql = sql.split("```")[1]
         if sql.startswith("sql"):
@@ -131,7 +141,7 @@ def node_executor(state: AgentState) -> AgentState:
         result = conn.execute(sql).fetchall()
         conn.close()
 
-        result_str = str(result[:50])  # cap at 50 rows for state storage
+        result_str = str(result[:50])
         return {
             **state,
             "execution_result":  result_str,
@@ -158,9 +168,8 @@ def node_critic(state: AgentState) -> AgentState:
     Analyses the execution error, classifies it, and formulates
     a targeted correction instruction for Node B.
     """
-    sql           = state["generated_sql"]
-    error_msg     = state["execution_error"]
-    error_history = state.get("error_history", [])
+    sql       = state["generated_sql"]
+    error_msg = state["execution_error"]
 
     prompt = f"""You are a SQL debugging expert.
 
@@ -179,16 +188,11 @@ Format your response as:
 ERROR_TYPE: <type>
 INSTRUCTION: <what to fix>"""
 
-    response = client.models.generate_content(
-        model=LLM_MODEL,
-        contents=prompt
-    )
-
-    correction = response.text.strip()
+    response_text = call_llm(prompt)
 
     return {
         **state,
-        "correction_instruction": correction,
+        "correction_instruction": response_text,
         "attempt_number": state.get("attempt_number", 1) + 1
     }
 
