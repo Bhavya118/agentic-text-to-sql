@@ -1,14 +1,14 @@
-from google import genai
+from openai import OpenAI
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
-client = genai.Client(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-response = client.models.generate_content(
-    model="gemini-2.5-flash",
-    contents="Say exactly this: LLM connection successful."
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Say exactly this: OpenAI connection successful."}]
 )
 
-print(response.text)
+print(response.choices[0].message.content)

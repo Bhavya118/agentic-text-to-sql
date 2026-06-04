@@ -82,7 +82,7 @@ def evaluate_database(db_name: str, limit: int = None) -> dict:
             baseline_out["sql"], gold_sql, db_path
         ) if baseline_out["success"] else {"match": False, "note": "execution failed"}
 
-        time.sleep(1)  # rate limit
+        time.sleep(5)  # rate limit
 
         # ── Run agent ─────────────────────────────────────────────────────────
         agent_out = run_agent_on_question(agent, question, db_name, db_path)
@@ -90,7 +90,7 @@ def evaluate_database(db_name: str, limit: int = None) -> dict:
             agent_out["sql"], gold_sql, db_path
         ) if agent_out["success"] else {"match": False, "note": "execution failed"}
 
-        time.sleep(1)  # rate limit
+        time.sleep(5)  # rate limit
 
         # ── Self-correction tracking ──────────────────────────────────────────
         # Did it fail on attempt 1 but succeed later?
@@ -208,5 +208,5 @@ if __name__ == "__main__":
     # Start with a small pilot — 5 questions from california_schools
     run_full_evaluation(
         db_names=["california_schools"],
-        limit_per_db=5
+        limit_per_db=20
     )
