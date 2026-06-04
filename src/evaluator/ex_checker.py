@@ -3,6 +3,11 @@ import duckdb
 from pathlib import Path
 
 
+def normalise_sql_quotes(sql: str) -> str:
+    """Convert MySQL-style backtick quotes to DuckDB double quotes."""
+    return sql.replace("`", '"')
+
+
 def execute_sql(sql: str, db_path: Path) -> tuple[list, str | None]:
     """
     Execute a SQL query against a database.
@@ -42,8 +47,8 @@ def check_execution_accuracy(
     Compare predicted SQL result against gold SQL result.
     Returns a dict with match status and details.
     """
-    pred_result, pred_error = execute_sql(predicted_sql, db_path)
-    gold_result, gold_error = execute_sql(gold_sql,      db_path)
+    pred_result, pred_error = execute_sql(normalise_sql_quotes(predicted_sql), db_path)
+    gold_result, gold_error = execute_sql(normalise_sql_quotes(gold_sql),      db_path)
 
     if gold_error:
         return {
