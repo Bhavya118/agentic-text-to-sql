@@ -3,15 +3,15 @@ import time
 import sqlite3
 import duckdb
 from pathlib import Path
-from groq import Groq
+from openai import OpenAI
 from config import GEMINI_API_KEY, LLM_MODEL, SEMANTIC_DIR, MAX_CORRECTIONS
 from src.agent.state import AgentState
 
-client = Groq(api_key=GEMINI_API_KEY)
+client = OpenAI(api_key=GEMINI_API_KEY)
 
 
-def call_llm(prompt: str, retries: int = 5, wait: int = 15) -> str:
-    """Call Groq with automatic retry on errors."""
+def call_llm(prompt: str, retries: int = 5, wait: int = 30) -> str:
+    """Call OpenAI with automatic retry on errors."""
     for attempt in range(retries):
         try:
             response = client.chat.completions.create(
@@ -20,12 +20,12 @@ def call_llm(prompt: str, retries: int = 5, wait: int = 15) -> str:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            if any(code in str(e) for code in ["429", "503", "UNAVAILABLE", "rate_limit"]):
+            if any(code in str(e) for code in ["429", "503", "rate_limit", "timeout"]):
                 print(f"\n  API busy, waiting {wait}s (attempt {attempt+1}/{retries})...")
                 time.sleep(wait)
             else:
                 raise
-    raise Exception("Groq failed after all retries")
+    raise Exception("OpenAI failed after all retries")
 
 
 # ── Node A — Context Retrieval ────────────────────────────────────────────────
