@@ -11,7 +11,7 @@ client = OpenAI(api_key=GEMINI_API_KEY)
 
 
 def call_llm(prompt: str, retries: int = 5, wait: int = 30) -> str:
-    """Call GitHub Models with automatic retry on errors."""
+    """Call OpenAI with automatic retry on errors."""
     for attempt in range(retries):
         try:
             response = client.chat.completions.create(
@@ -25,7 +25,7 @@ def call_llm(prompt: str, retries: int = 5, wait: int = 30) -> str:
                 time.sleep(wait)
             else:
                 raise
-    raise Exception("GitHub Models failed after all retries")
+    raise Exception("OpenAI failed after all retries")
 
 
 # ── Node A — Context Retrieval ────────────────────────────────────────────────
@@ -112,6 +112,7 @@ Relevant schema context:
 {error_section}
 
 Write a single valid SQLite SQL query that answers the question.
+Always use double quotes around column names that contain spaces or special characters.
 Return ONLY the SQL query. No explanation, no markdown, no backticks."""
 
     response_text = call_llm(prompt)
