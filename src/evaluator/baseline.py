@@ -4,13 +4,13 @@ import time
 import duckdb
 from pathlib import Path
 from openai import OpenAI
-from config import GEMINI_API_KEY, LLM_MODEL, SEMANTIC_DIR, MAX_CORRECTIONS
+from config import GEMINI_API_KEY, LLM_MODEL
 
 client = OpenAI(api_key=GEMINI_API_KEY)
 
 
 def call_llm(prompt: str, retries: int = 5, wait: int = 30) -> str:
-    """Call GitHub Models with automatic retry on errors."""
+    """Call OpenAI with automatic retry on errors."""
     for attempt in range(retries):
         try:
             response = client.chat.completions.create(
@@ -24,7 +24,7 @@ def call_llm(prompt: str, retries: int = 5, wait: int = 30) -> str:
                 time.sleep(wait)
             else:
                 raise
-    raise Exception("GitHub Models failed after all retries")
+    raise Exception("OpenAI failed after all retries")
 
 
 def get_raw_schema(db_path: Path) -> str:
@@ -62,6 +62,7 @@ Database schema:
 {raw_schema}
 
 Write a single valid SQLite SQL query that answers the question.
+Always use double quotes around column names that contain spaces or special characters.
 Return ONLY the SQL query. No explanation, no markdown, no backticks."""
 
     sql = call_llm(prompt)
