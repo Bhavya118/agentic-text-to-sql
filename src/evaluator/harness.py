@@ -205,8 +205,12 @@ def run_full_evaluation(db_names: list[str], limit_per_db: int = None):
 
 
 if __name__ == "__main__":
-    # Start with a small pilot — 5 questions from california_schools
+    from config import SEMANTIC_DIR
+    db_names = [
+        p.stem.replace("_semantic_context", "")
+        for p in sorted(SEMANTIC_DIR.glob("*_semantic_context.json"))
+    ]
     run_full_evaluation(
-        db_names=["california_schools"],
-        limit_per_db=5
+        db_names=db_names,
+        limit_per_db=None  # None = all questions
     )
