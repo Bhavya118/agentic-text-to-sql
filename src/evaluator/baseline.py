@@ -47,24 +47,31 @@ def get_raw_schema(db_path: Path) -> str:
     return "\n".join(schema_lines)
 
 
-def run_baseline(question: str, db_path: Path) -> dict:
+def run_baseline(question: str, db_path: Path, evidence: str = "") -> dict:
     """
-    One-shot baseline: sends question + raw schema to LLM in a single prompt.
+    One-shot baseline: sends question + raw schema + evidence to LLM in a single prompt.
     No semantic context, no correction loop.
     """
     raw_schema = get_raw_schema(db_path)
 
-    prompt = f"""You are an expert SQL writer for SQLite databases.
+    evidence_section = f"\nAdditional hint: {evidence}\n" if evidence else ""
+
+    prompt = f"""You are an expert SQLite query writer.
 
 Question: {question}
-
+{evidence_section}
 Database schema:
 {raw_schema}
 
-Write a single valid SQLite SQL query that answers the question.
-Always use double quotes around column names that contain spaces or special characters.
-Return ONLY the SQL query. No explanation, no markdown, no backticks."""
-
+Rules:
+- Write a single valid SQLite SQL query that answers the question.
+- Always wrap column names containing spaces or special characters in double quotes.
+- Use exact column and table names from the schema above — do not guess or abbreviate.
+- Evidence hints may contain pseudo-code or shorthand notation (e.g. SUBTRACT(), DIVIDE(), AVG(x WHERE y)). Translate these into valid SQLite syntax — never copy pseudo-code function names directly into SQL.
+- When evidence gives an explicit formula (e.g. "X = A / B"), follow the exact arithmetic structure given, including order of operations and which value is the numerator vs denominator.
+- When the question asks to "list" or "show" a field, exclude rows where that field itself is NULL, unless explicitly asked to include them.
+- When the question asks for a "rank" or "ranking", include an explicit rank/position column using ROW_NUMBER() or RANK() OVER (...), not just an ORDER BY.
+- Return ONLY the SQL query. No explanation, no markdown, no backticks."""
     sql = call_llm(prompt)
 
     if sql.startswith("```"):

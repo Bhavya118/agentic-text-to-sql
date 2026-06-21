@@ -37,6 +37,7 @@ def node_context_retrieval(state: AgentState) -> AgentState:
     """
     db_name  = state["db_name"]
     question = state["question"]
+    evidence = state.get("evidence", "")
 
     context_path = SEMANTIC_DIR / f"{db_name}_semantic_context.json"
     with open(context_path, "r", encoding="utf-8") as f:
@@ -65,10 +66,12 @@ def node_context_retrieval(state: AgentState) -> AgentState:
     if join_paths:
         full_context += f"\n\nKnown join paths:\n{join_paths}"
 
+    evidence_section = f"\nAdditional hint: {evidence}\n" if evidence else ""
+
     prompt = f"""You are a database expert helping to identify relevant schema elements.
 
 Question: {question}
-
+{evidence_section}
 Available schema with descriptions:
 {full_context}
 
@@ -86,12 +89,15 @@ Be specific and complete — do not omit columns needed for joins or filters."""
 def node_sql_generator(state: AgentState) -> AgentState:
     """
     Produces a SQL query conditioned on retrieved context,
-    the question, and any prior error history.
+    the question, evidence, and any prior error history.
     """
     question          = state["question"]
     retrieved_context = state["retrieved_context"]
+    evidence          = state.get("evidence", "")
     error_history     = state.get("error_history", [])
     correction        = state.get("correction_instruction", "")
+
+    evidence_section = f"\nImportant hint (use exact values/formulas given here): {evidence}\n" if evidence else ""
 
     error_section = ""
     if error_history:
@@ -103,16 +109,25 @@ Correction instruction: {correction}
 
 Do NOT repeat the same mistakes."""
 
-    prompt = f"""You are an expert SQL writer for SQLite databases.
+    prompt = f"""You are an expert SQLite query writer.
 
 Question: {question}
-
+{evidence_section}
 Relevant schema context:
 {retrieved_context}
 {error_section}
 
-Write a single valid SQLite SQL query that answers the question.
-Return ONLY the SQL query. No explanation, no markdown, no backticks."""
+Rules:
+- Write a single valid SQLite SQL query that answers the question.
+- If a hint above gives an exact value, column condition, or formula, use it EXACTLY as written — do not paraphrase or expand abbreviations.
+- Always wrap column names containing spaces or special characters in double quotes.
+- Use exact column and table names from the context above — do not guess or abbreviate.
+- When the question asks to "list" or "show" a particular field, exclude rows where that field itself is NULL, unless the question explicitly asks to include them.
+- Evidence hints may contain pseudo-code or shorthand notation (e.g. SUBTRACT(), DIVIDE(), AVG(x WHERE y)). Translate these into valid SQLite syntax — never copy pseudo-code function names directly into SQL, as functions like SUBTRACT() and DIVIDE() do not exist in SQLite.
+- When evidence gives an explicit formula (e.g. "X = A / B"), follow the exact arithmetic structure given, including order of operations and which value is the numerator vs denominator.
+- When the question asks for a "rank" or "ranking", include an explicit rank/position column using ROW_NUMBER() or RANK() OVER (...), not just an ORDER BY.
+- Double-check that every column referenced actually exists in the table you are selecting it from — if a column belongs to a different table in a join, reference it with the correct table alias.
+- Return ONLY the SQL query. No explanation, no markdown, no backticks."""
 
     response_text = call_llm(prompt)
 
@@ -168,21 +183,28 @@ def node_critic(state: AgentState) -> AgentState:
     Analyses the execution error, classifies it, and formulates
     a targeted correction instruction for Node B.
     """
-    sql       = state["generated_sql"]
-    error_msg = state["execution_error"]
+    sql           = state["generated_sql"]
+    error_msg     = state["execution_error"]
+    error_history = state.get("error_history", [])
+
+    repeat_warning = ""
+    if len(error_history) >= 2 and error_history[-1] == error_history[-2]:
+        repeat_warning = "\nWARNING: The same error occurred on the previous attempt too. The previous fix did not work — propose a fundamentally different approach, not a minor tweak."
 
     prompt = f"""You are a SQL debugging expert.
 
 A SQL query failed with the following error:
 Error: {error_msg}
+{repeat_warning}
 
 The failing query was:
 {sql}
 
 Classify this error as one of: SYNTAX | SEMANTIC | LOGIC
 
+If the error mentions a column not found in a table, identify which table actually contains that column (check the error message's "Candidate bindings" if present) and instruct the generator to reference it through the correct table alias or add the necessary JOIN.
+
 Then provide a specific, actionable correction instruction in 1-2 sentences.
-Tell the SQL generator exactly what to fix.
 
 Format your response as:
 ERROR_TYPE: <type>

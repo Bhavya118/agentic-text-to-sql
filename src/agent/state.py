@@ -10,6 +10,7 @@ class AgentState(TypedDict):
     question:        str           # The user's natural language question
     db_name:         str           # Which database to query
     db_path:         str           # Full path to the SQLite file
+    evidence:        str          # NEW — BIRD evidence hint
 
     # Context retrieval (Node A output)
     retrieved_context: str         # Relevant tables/columns from semantic context
