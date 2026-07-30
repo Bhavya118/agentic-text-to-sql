@@ -6,10 +6,10 @@
 | File | Used? | Purpose |
 |------|-------|---------|
 | dev.json | YES | 1,534 questions + gold SQL + db_id |
-| *.sqlite | YES | actual database files — profiled + queried |
+| *.sqlite | YES | actual database files - profiled + queried |
 | dev.sql | NO | not used |
 | dev_tables.json | NO | not used |
-| database_description/*.csv | NO | deliberately excluded — we generate these automatically |
+| database_description/*.csv | NO | deliberately excluded - we generate these automatically |
 | .DS_Store | NO | Mac system file, ignore |
 
 ---
@@ -36,7 +36,7 @@
 - `state.py` — defines shared state object passed between all 4 nodes
 - `nodes.py` — implements the 4 nodes
   - Node A: INPUT: question + semantic_context.json → OUTPUT: retrieved_context (relevant tables/columns)
-  - Node B: INPUT: question + retrieved_context + error_history → OUTPUT: generated_sql
+  - Node B: INPUT: question + retrieved_context + Evidence + error_history → OUTPUT: generated_sql
   - Node C: INPUT: generated_sql → DuckDB → OUTPUT: result (success) or error_message (failure)
   - Node D: INPUT: failed_sql + error_message → OUTPUT: error_type + correction_instruction → back to Node B
 - `graph.py` — connects nodes into directed graph, defines routing logic
@@ -45,10 +45,10 @@
 
 **Component 3 — Evaluation Framework**
 
-- `baseline.py` — INPUT: question + raw schema only → GPT → SQL → DuckDB → result (no context, no retry)
+- `baseline.py` — INPUT: question + raw schema only + Evidence → GPT → SQL → DuckDB → result (no context, no retry)
 - `ex_checker.py` — INPUT: predicted_sql + gold_sql → runs both → compares result tables → match True/False
 - `harness.py` — orchestrates everything, loads dev.json, runs baseline + agent per question, saves checkpoints
-- `analyse_results.py` — reads checkpoint files, computes per-database metrics
+
 
 ---
 
@@ -140,3 +140,35 @@ Worst database: thrombosis_prediction 10.4% — complex medical schema
 
 ## GitHub
 https://github.com/Bhavya118/agentic-text-to-sql
+
+
+---
+
+## Key Findings This Week
+
+1. Evidence hints injected only into Node A's context-retrieval step degraded agent accuracy, because Node A paraphrases schema context and silently loses precise values (e.g. rewriting `'SME'` as `'Small and Medium Enterprises'`) - fixed by passing evidence verbatim directly to the SQL generation node.
+
+2. A subset of accuracy losses stem not from incorrect query logic but from unstated conventions in BIRD's gold annotations, such as implicitly excluding NULL values from "list" queries even when not explicitly requested - meaning part of the EX gap reflects benchmark annotation style rather than genuine reasoning failure.
+
+3. Prompt refinements fall into two categories: general-purpose fixes (e.g. translating evidence pseudo-code into valid SQL, preventing the correction loop from repeating identical failed fixes) likely to generalize to real industrial schemas, versus benchmark-specific conventions that may not transfer to other domains - a limitation worth noting for real-world generalizability claims.
+
+4. Discovered a genuine data integrity bug in the BIRD benchmark itself: 48 of 129 questions (37.2%) in the `european_football_2` database reference a `player_name` column on the `Player` table that does not exist there (it is only on a separate `Player_old` table) - confirmed by showing BIRD's own gold SQL fails to execute, meaning part of the accuracy gap on this database is a benchmark data issue, not a system limitation.
+
+
+---
+
+## Accuracy Experiments — Current Status
+
+- Created a fixed, reproducible 55-question sample (5 per database x 11 databases) for fast iteration without running the full 1,534-question set every time
+
+- Added BIRD evidence hints to both baseline and agent prompts (as requested) - isolates the comparison from "who has more information"
+
+- Progression of agent vs baseline on the 55-question sample as fixes were applied:
+  - No evidence, original prompts: Agent 38.14% vs Baseline 28.23% (full 1,534 set)
+  - Evidence added, bug in Node A (evidence lost via paraphrasing): Agent 34-40% vs Baseline 54-56% - agent regressed
+  - Fixed: evidence passed directly to Node B, NULL-exclusion rule, pseudo-code translation rule added: Agent 54.55% vs Baseline 49.09% (agent-only improvements)
+  - Same rules added to baseline for fairness: Agent 50.91% vs Baseline 56.36% - still investigating this gap, partly explained by small-sample variance and the european_football_2 data bug
+
+- Open question: with both systems given equal evidence and equal prompt quality, does the agent's architecture (semantic context + self-correction) still add value? This is the core ablation question - not yet conclusively answered on the small sample, full ablation study (4 conditions) still needed
+
+- Next: patch or exclude the 48 broken european_football_2 questions, re-run clean comparison, then build the 4-condition ablation study (context-only, correction-only, both, neither)
