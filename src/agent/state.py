@@ -10,9 +10,13 @@ class AgentState(TypedDict):
     question:        str           # The user's natural language question
     db_name:         str           # Which database to query
     db_path:         str           # Full path to the SQLite file
+    evidence:        str          # NEW — BIRD evidence hint
 
     # Context retrieval (Node A output)
     retrieved_context: str         # Relevant tables/columns from semantic context
+    include_raw_fallback: Optional[bool]  # Whether Node B should also see the full raw schema as a safety net.
+                                           # True by default; set False when retrieved_context already IS the raw
+                                           # schema (Condition C), to avoid showing it twice.
 
     # SQL generation (Node B output)
     generated_sql:   str           # The current SQL query attempt
