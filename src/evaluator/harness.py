@@ -1,14 +1,24 @@
 import json
 import time
-import sqlite3
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
-from config import DATA_DIR, RESULTS_DIR, SEMANTIC_DIR, MAX_CORRECTIONS
+from config import DATA_DIR, RESULTS_DIR, SEMANTIC_DIR
 from src.evaluator.baseline import run_baseline
 from src.evaluator.ex_checker import check_execution_accuracy
-from src.agent.graph import build_agent
-from src.agent.state import AgentState
+from src.agent.graph import (
+    build_agent,
+    build_condition_b_context_only,
+    build_condition_c_correction_only
+)
+
+# Ablation conditions beyond the baseline (Condition A).
+# Keys double as the field name each condition's per-question result is stored under.
+CONDITION_BUILDERS = {
+    "context_only":    build_condition_b_context_only,   # Condition B
+    "correction_only": build_condition_c_correction_only,  # Condition C
+    "full_agent":      build_agent,                        # Condition D
+}
 
 
 def load_bird_questions(db_name: str, limit: int = None, use_sample: bool = False) -> list[dict]:
@@ -34,13 +44,14 @@ def load_bird_questions(db_name: str, limit: int = None, use_sample: bool = Fals
 
 
 def run_agent_on_question(agent, question: str, db_name: str, db_path: Path, evidence: str = "") -> dict:
-    """Run the full agent on a single question."""
+    """Run one ablation condition's compiled graph on a single question."""
     initial_state = {
         "question":               question,
         "db_name":                db_name,
         "db_path":                str(db_path),
         "evidence":               evidence,
         "retrieved_context":      "",
+        "include_raw_fallback":   True,
         "generated_sql":          "",
         "execution_result":       None,
         "execution_error":        None,
@@ -101,7 +112,8 @@ def evaluate_database(db_name: str, run_dir: Path, limit: int = None, use_sample
         print(f"  All questions already completed for {db_name}")
         return compute_metrics(db_name, results)
 
-    agent = build_agent()
+    # Build all three agent-variant graphs once, reused across every question.
+    agents = {key: builder() for key, builder in CONDITION_BUILDERS.items()}
 
     for q in tqdm(remaining, desc=f"  Evaluating {db_name}"):
         question = q["question"]
@@ -109,7 +121,7 @@ def evaluate_database(db_name: str, run_dir: Path, limit: int = None, use_sample
         evidence = q.get("evidence", "")
         q_id     = str(q.get("question_id", q.get("id", "unknown")))
 
-        # ── Run baseline ──────────────────────────────────────────────────────
+        # ── Condition A — Baseline ──────────────────────────────────────────────
         try:
             baseline_out = run_baseline(question, db_path, evidence)
             baseline_ex  = check_execution_accuracy(
@@ -121,35 +133,41 @@ def evaluate_database(db_name: str, run_dir: Path, limit: int = None, use_sample
 
         time.sleep(3)
 
-        # ── Run agent ─────────────────────────────────────────────────────────
-        try:
-            agent_out = run_agent_on_question(agent, question, db_name, db_path, evidence)
-            agent_ex  = check_execution_accuracy(
-                agent_out["sql"], gold_sql, db_path
-            ) if agent_out["success"] else {"match": False, "note": "execution failed"}
-        except Exception as e:
-            agent_out = {"sql": "", "success": False, "attempts": 1, "error_history": [], "result": None}
-            agent_ex  = {"match": False, "note": f"error: {e}"}
-
-        time.sleep(3)
-
-        corrected = (agent_out["attempts"] > 1 and agent_out["success"])
-
         result = {
-            "question_id":      q_id,
-            "question":         question,
-            "gold_sql":         gold_sql,
-            "evidence":         evidence,
-            "baseline_sql":     baseline_out["sql"],
-            "baseline_match":   baseline_ex["match"],
-            "baseline_success": baseline_out["success"],
-            "agent_sql":        agent_out["sql"],
-            "agent_match":      agent_ex["match"],
-            "agent_success":    agent_out["success"],
-            "agent_attempts":   agent_out["attempts"],
-            "self_corrected":   corrected,
-            "error_history":    agent_out["error_history"]
+            "question_id": q_id,
+            "question":    question,
+            "gold_sql":    gold_sql,
+            "evidence":    evidence,
+            "baseline": {
+                "sql":     baseline_out["sql"],
+                "match":   baseline_ex["match"],
+                "success": baseline_out["success"]
+            }
         }
+
+        # ── Conditions B, C, D — agent variants ──────────────────────────────────
+        for cond_key, agent in agents.items():
+            try:
+                agent_out = run_agent_on_question(agent, question, db_name, db_path, evidence)
+                agent_ex  = check_execution_accuracy(
+                    agent_out["sql"], gold_sql, db_path
+                ) if agent_out["success"] else {"match": False, "note": "execution failed"}
+            except Exception as e:
+                agent_out = {"sql": "", "success": False, "attempts": 1, "error_history": [], "result": None}
+                agent_ex  = {"match": False, "note": f"error: {e}"}
+
+            time.sleep(3)
+
+            corrected = (agent_out["attempts"] > 1 and agent_out["success"])
+
+            result[cond_key] = {
+                "sql":            agent_out["sql"],
+                "match":          agent_ex["match"],
+                "success":        agent_out["success"],
+                "attempts":       agent_out["attempts"],
+                "self_corrected": corrected,
+                "error_history":  agent_out["error_history"]
+            }
 
         results.append(result)
 
@@ -162,29 +180,32 @@ def evaluate_database(db_name: str, run_dir: Path, limit: int = None, use_sample
 
 
 def compute_metrics(db_name: str, results: list) -> dict:
-    """Compute EX and self-correction metrics from results."""
-    total          = len(results)
-    baseline_ex    = sum(1 for r in results if r["baseline_match"])
-    agent_ex_count = sum(1 for r in results if r["agent_match"])
-
-    initially_failed = [r for r in results if len(r["error_history"]) > 0]
-    corrected_count  = sum(1 for r in initially_failed if r["self_corrected"])
-    self_correction_rate = (
-        corrected_count / len(initially_failed) * 100
-        if initially_failed else 0.0
-    )
+    """Compute per-condition EX and self-correction metrics from results."""
+    total       = len(results)
+    baseline_ex = sum(1 for r in results if r["baseline"]["match"])
 
     metrics = {
-        "database":             db_name,
-        "total_questions":      total,
-        "baseline_ex":          baseline_ex,
-        "baseline_ex_pct":      round(baseline_ex / total * 100, 2),
-        "agent_ex":             agent_ex_count,
-        "agent_ex_pct":         round(agent_ex_count / total * 100, 2),
-        "initially_failed":     len(initially_failed),
-        "self_corrected":       corrected_count,
-        "self_correction_rate": round(self_correction_rate, 2)
+        "database":        db_name,
+        "total_questions": total,
+        "baseline_ex":     baseline_ex,
+        "baseline_ex_pct": round(baseline_ex / total * 100, 2) if total else 0.0,
     }
+
+    for cond_key in CONDITION_BUILDERS:
+        cond_ex = sum(1 for r in results if r[cond_key]["match"])
+
+        initially_failed = [r for r in results if len(r[cond_key]["error_history"]) > 0]
+        corrected_count  = sum(1 for r in initially_failed if r[cond_key]["self_corrected"])
+        self_correction_rate = (
+            corrected_count / len(initially_failed) * 100
+            if initially_failed else 0.0
+        )
+
+        metrics[f"{cond_key}_ex"]                    = cond_ex
+        metrics[f"{cond_key}_ex_pct"]                 = round(cond_ex / total * 100, 2) if total else 0.0
+        metrics[f"{cond_key}_initially_failed"]       = len(initially_failed)
+        metrics[f"{cond_key}_self_corrected"]         = corrected_count
+        metrics[f"{cond_key}_self_correction_rate"]   = round(self_correction_rate, 2)
 
     return {"metrics": metrics, "results": results}
 
@@ -226,37 +247,50 @@ def run_full_evaluation(db_names: list[str], limit_per_db: int = None, run_id: s
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
     if all_metrics:
-        total_q        = sum(m["total_questions"]  for m in all_metrics)
-        total_base_ex  = sum(m["baseline_ex"]      for m in all_metrics)
-        total_agent_ex = sum(m["agent_ex"]         for m in all_metrics)
-        total_init_fail= sum(m["initially_failed"] for m in all_metrics)
-        total_corrected= sum(m["self_corrected"]   for m in all_metrics)
+        total_q       = sum(m["total_questions"] for m in all_metrics)
+        total_base_ex = sum(m["baseline_ex"]      for m in all_metrics)
 
         aggregate = {
-            "run_id":                run_dir.name,
-            "databases_evaluated":   len(all_metrics),
-            "total_questions":       total_q,
-            "baseline_ex_pct":       round(total_base_ex  / total_q * 100, 2),
-            "agent_ex_pct":          round(total_agent_ex / total_q * 100, 2),
-            "improvement_pct":       round((total_agent_ex - total_base_ex) / total_q * 100, 2),
-            "self_correction_rate":  round(total_corrected / total_init_fail * 100, 2) if total_init_fail > 0 else 0.0,
-            "per_database":          all_metrics
+            "run_id":              run_dir.name,
+            "databases_evaluated": len(all_metrics),
+            "total_questions":     total_q,
+            "baseline_ex_pct":     round(total_base_ex / total_q * 100, 2),
         }
+
+        for cond_key in CONDITION_BUILDERS:
+            cond_ex_total   = sum(m[f"{cond_key}_ex"]                  for m in all_metrics)
+            init_fail_total = sum(m[f"{cond_key}_initially_failed"]     for m in all_metrics)
+            corrected_total = sum(m[f"{cond_key}_self_corrected"]       for m in all_metrics)
+
+            aggregate[f"{cond_key}_ex_pct"] = round(cond_ex_total / total_q * 100, 2)
+            aggregate[f"{cond_key}_improvement_pct"] = round(
+                (cond_ex_total - total_base_ex) / total_q * 100, 2
+            )
+            aggregate[f"{cond_key}_self_correction_rate"] = (
+                round(corrected_total / init_fail_total * 100, 2) if init_fail_total > 0 else 0.0
+            )
+
+        aggregate["per_database"] = all_metrics
 
         summary_path = run_dir / "aggregate_results.json"
         with open(summary_path, "w") as f:
             json.dump(aggregate, f, indent=2)
 
         print("\n" + "="*50)
-        print("EVALUATION COMPLETE")
+        print("EVALUATION COMPLETE — 4-CONDITION ABLATION")
         print("="*50)
         print(f"Run ID              : {aggregate['run_id']}")
         print(f"Databases evaluated : {aggregate['databases_evaluated']}")
         print(f"Total questions     : {aggregate['total_questions']}")
-        print(f"Baseline EX         : {aggregate['baseline_ex_pct']}%")
-        print(f"Agent EX            : {aggregate['agent_ex_pct']}%")
-        print(f"Improvement         : +{aggregate['improvement_pct']}%")
-        print(f"Self-correction rate: {aggregate['self_correction_rate']}%")
+        print(f"Condition A — baseline           : {aggregate['baseline_ex_pct']}%")
+        print(f"Condition B — context only       : {aggregate['context_only_ex_pct']}%  "
+              f"(Δ {aggregate['context_only_improvement_pct']:+.2f} pp)")
+        print(f"Condition C — correction only    : {aggregate['correction_only_ex_pct']}%  "
+              f"(Δ {aggregate['correction_only_improvement_pct']:+.2f} pp, "
+              f"self-correction {aggregate['correction_only_self_correction_rate']}%)")
+        print(f"Condition D — full agent         : {aggregate['full_agent_ex_pct']}%  "
+              f"(Δ {aggregate['full_agent_improvement_pct']:+.2f} pp, "
+              f"self-correction {aggregate['full_agent_self_correction_rate']}%)")
         print(f"\nResults saved to: {run_dir}")
 
 

@@ -1,10 +1,9 @@
-import json
-import sqlite3
 import time
 import duckdb
 from pathlib import Path
 from openai import OpenAI
 from config import GEMINI_API_KEY, LLM_MODEL
+from src.common.schema_utils import get_raw_schema
 
 client = OpenAI(api_key=GEMINI_API_KEY)
 
@@ -15,6 +14,7 @@ def call_llm(prompt: str, retries: int = 5, wait: int = 30) -> str:
         try:
             response = client.chat.completions.create(
                 model=LLM_MODEL,
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}]
             )
             return response.choices[0].message.content.strip()
@@ -25,26 +25,6 @@ def call_llm(prompt: str, retries: int = 5, wait: int = 30) -> str:
             else:
                 raise
     raise Exception("OpenAI failed after all retries")
-
-
-def get_raw_schema(db_path: Path) -> str:
-    """
-    Extract raw schema (table and column names only) from a SQLite database.
-    No descriptions, no sample values, no semantic context.
-    """
-    conn   = sqlite3.connect(str(db_path))
-    tables = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    ).fetchall()
-
-    schema_lines = []
-    for (table_name,) in tables:
-        cols = conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()
-        col_defs = ", ".join(f"{c[1]} {c[2]}" for c in cols)
-        schema_lines.append(f"Table: {table_name} ({col_defs})")
-
-    conn.close()
-    return "\n".join(schema_lines)
 
 
 def run_baseline(question: str, db_path: Path, evidence: str = "") -> dict:
@@ -70,7 +50,9 @@ Rules:
 - Evidence hints may contain pseudo-code or shorthand notation (e.g. SUBTRACT(), DIVIDE(), AVG(x WHERE y)). Translate these into valid SQLite syntax — never copy pseudo-code function names directly into SQL.
 - When evidence gives an explicit formula (e.g. "X = A / B"), follow the exact arithmetic structure given, including order of operations and which value is the numerator vs denominator.
 - When the question asks to "list" or "show" a field, exclude rows where that field itself is NULL, unless explicitly asked to include them.
-- When the question asks for a "rank" or "ranking", include an explicit rank/position column using ROW_NUMBER() or RANK() OVER (...), not just an ORDER BY.
+- When the question asks for a "rank" or "ranking", include an explicit rank/position column using RANK() OVER (...), not just an ORDER BY. Prefer RANK() over ROW_NUMBER() — RANK() gives tied values the same rank, which is almost always the intended meaning; only use ROW_NUMBER() if the question explicitly needs a unique sequential position even among ties.
+- Order the columns in your SELECT clause to match the order the corresponding entities are mentioned or requested in the question — do not reorder them for readability, since column order is part of exact-match grading.
+- Do not add a JOIN, table, or extra condition that isn't strictly required to answer the question — prefer the simplest query that satisfies the literal question over a more elaborate one, even if the elaborate one seems more thorough.
 - Return ONLY the SQL query. No explanation, no markdown, no backticks."""
     sql = call_llm(prompt)
 
