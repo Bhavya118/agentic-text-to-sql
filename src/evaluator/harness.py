@@ -303,9 +303,9 @@ if __name__ == "__main__":
 
     print(f"Databases to evaluate: {db_names}")
 
-    # Use the fixed 50-question sample for fast iteration during development
+    # Full BIRD dev set (1,534 questions) -- final thesis evaluation run.
     run_full_evaluation(
         db_names=db_names,
         limit_per_db=None,
-        use_sample=True
+        use_sample=False
     )

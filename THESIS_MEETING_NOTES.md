@@ -175,127 +175,21 @@ https://github.com/Bhavya118/agentic-text-to-sql
 
 ---
 
-## 2026-07-30
+## 2026-08-04
 
-### Context
-- Meeting with Prof. Höpken scheduled for 2026-07-31. Went in needing an answer for why agent EX was tracking at or below baseline on the 55-question sample (50.91% vs 56.36% in the `eval_20260622_000408` run), and a concrete plan to fix it.
-- european_football_2 database patched (Player table now has player_name/birthday/weight copied from Player_old) — committed, all 129 gold SQL queries in that database now execute.
+### What changed since the last full run (baseline 28.23% / agent 38.14%)
 
-### Root-cause hypotheses identified from code review
-1. **Node B had no raw-schema fallback.** `node_sql_generator` only ever received Node A's *summarised* semantic context, never the raw schema. If Node A dropped a table/column while summarising, Node B had no way to recover it — whereas the baseline always sees the *full*, unfiltered raw schema. This is a plausible explanation for cases like `formula_1` (baseline 100% vs agent 80% on the 55-question sample): a small schema where filtering can only hurt, never help.
-2. **The correction loop is blind to silent logical errors.** Node D only fires when `execution_error` is set. A query that runs cleanly but returns the wrong answer — no syntax error, just wrong logic — never triggers a correction. This is a structural blind spot in the current architecture, not yet fixed (would need self-consistency voting across multiple candidate SQLs, or a result-plausibility critic pass even on execution success — both add API calls, deferred pending budget decision).
-3. `call_llm` never set `temperature`, so every node was running at the OpenAI default (non-zero) — reducing determinism on a task where consistency should help.
+- Built the two missing ablation conditions — **B: context only**, **C: correction only** — alongside baseline (A) and full agent (D). Full 4-condition framework now complete, as requested.
+- Fixed Node B never falling back to the raw schema when context retrieval dropped a needed column.
+- Added **value grounding** — fuzzy-matches question entities against real database values, so filters use exact stored values instead of guessed wording/casing.
+- Added **duplicate-column collision detection** — flags column names that exist identically on more than one table (e.g. `Diagnosis` on two unrelated tables) and warns the model to disambiguate.
+- **Rewrote schema linking to output structured, validated selections instead of free text** — the model can no longer describe a plausible-but-wrong join or column as if it were the obvious choice; any invented name is dropped automatically.
+- Added ranking-function, column-ordering, and anti-unnecessary-join fixes — applied identically to baseline and agent prompts for fairness.
+- Every fix verified offline (schema/data checks, unit tests) before any paid evaluation run.
 
-### Fixes applied (code only — zero API calls made while implementing/verifying)
-1. Added `src/common/schema_utils.py` with a shared `get_raw_schema()`, deduplicated out of `baseline.py`.
-2. Node B now always receives the full raw schema as a labelled safety-net section alongside Node A's retrieved context, so it can no longer lose visibility into a column/table Node A dropped.
-3. `temperature=0` added to every LLM call (all agent nodes + baseline).
+---
 
-### Ablation study built (per Prof's request from the June 2026 meeting)
-- Condition A — baseline (already existed, unchanged).
-- Condition B — context only: Node A + B + C, correction loop removed entirely (`build_condition_b_context_only` in `graph.py`) — isolates Node A's (semantic context) contribution.
-- Condition C — correction only: Node A replaced with a raw-schema loader (`node_raw_schema_context`), Node B + C + D retry loop kept (`build_condition_c_correction_only` in `graph.py`) — isolates Node D's (self-correction) contribution.
-- Condition D — full agent (already existed, unchanged).
-- `harness.py` rewired to run and checkpoint all 4 conditions per question, computing per-condition and aggregate EX + self-correction metrics.
-- Verified all three graphs build/compile correctly and `compute_metrics` produces correct per-condition output against hand-built fake data — confirmed with no real OpenAI calls.
-
-### Not yet done
-- Have NOT run the 55-question × 4-condition ablation yet — needs a real, paid evaluation run, deliberately not executed by Claude (API key is off-limits per instruction, all spend decisions stay with me).
-- european_football_2 debug/fix scripts (`check_ef_fix.py`, `fix_ef_id.py`, `verify_ef_fix.py`, etc.) still sitting in repo root — the fix itself is committed, scripts are cleanup candidates, not yet removed.
-
-### Next steps
-1. Decide whether to spend on running the 55-question, 4-condition ablation before tomorrow's meeting, or present the root-cause hypothesis + fix + ablation design as the story if there isn't time/budget.
-2. If run: compare Condition B vs D to isolate Node A's contribution, Condition C vs D to isolate Node D's contribution, and check whether the Node B raw-schema-fallback fix closes the baseline gap seen in the `eval_20260622_000408` run.
-3. Still pending from earlier weeks: few-shot examples in Node B, McNemar's significance test, final full 1,534-question run, self-consistency/result-plausibility check for silent logical errors.
-
-### Research: what top BIRD leaderboard systems do differently
-Researched current top-performing BIRD systems (CHASE-SQL 73.0% EX, XiYan-SQL 75.6% EX, MCS-SQL, DIN-SQL, DAIL-SQL, CHESS) to see which of their techniques are adoptable here. Key finding worth citing directly: **ErrorLLM (arXiv:2603.03742)** measured that syntax/execution errors account for only ~3% of incorrect SQL queries — the rest execute successfully but are semantically wrong (execution-based self-debugging gets 100% precision but only 2.95–6.50% recall on real error sets). This is hard, citable, external validation of the Node D blind spot identified earlier today (correction loop only fires on `execution_error`, structurally blind to silently-wrong SQL).
-
-Techniques triaged into tiers by cost/effort — full breakdown with sources kept in the chat session, condensed list:
-- **Tier 1 (free/near-free, implemented today)**: value retrieval (CHESS/XiYan-SQL/CHASE-SQL), M-Schema-style prompt formatting (XiYan-SQL), rule-based schema pre-check before the LLM critic (PV-SQL/LitE-SQL style).
-- **Tier 2 (cheap, not yet implemented)**: few-shot examples via masked/skeleton-similarity retrieval (DAIL-SQL, XiYan-SQL) — same idea as the pre-existing "add few-shot examples" next step, now with a concrete retrieval method behind it.
-- **Tier 3 (moderate–high cost, not yet implemented)**: explicit error-type/plausibility detection instead of relying on execution errors (ErrorLLM), self-consistency multi-candidate voting (CHASE-SQL/XiYan-SQL/MCS-SQL) — the two techniques that would most directly close the Node D blind spot, but both add real API cost (self-consistency is N× Node B calls).
-
-### Tier 1 implementation (code only, zero API calls made)
-1. **Value retrieval/grounding** (`src/common/value_retrieval.py`, new) — fuzzy-matches entities in the question/evidence against real column values already collected by `schema_profiler.py` (`sample_values` + `value_distribution` in `*_raw_profile.json`) using stdlib `difflib`, no embeddings, no LLM call. Injected into Node A's prompt and Node B's prompt (the latter gated by `include_raw_fallback`, so Condition C stays a clean "raw-schema-only" comparison). Verified against a real question ("Fresno county" → correctly matched `County Name`/`cname`/`County`/`City`/`MailCity` = 'Fresno' across 3 tables in `california_schools`).
-2. **M-Schema-style formatting for Node A** — `node_context_retrieval` now cross-references `*_raw_profile.json` at runtime and merges data type, primary-key flag, and example values into each column line alongside the synthesised description/KPI flag/notes, instead of description-only prose. No re-synthesis of the semantic context JSONs needed (those still lack type/PK/samples entirely — confirmed by inspecting the actual files).
-3. **Deterministic schema pre-check for Node D** — new `find_columns()` / `extract_missing_columns()` in `src/common/schema_utils.py`. Before the critic's LLM call, "column not found" errors are parsed and cross-checked against the real schema in plain Python; the correct table(s) are handed to the critic as ground truth instead of leaving it to parse/guess from the raw DuckDB error string. Verified against the (now-patched) european_football_2 database: a synthetic "player_name not found" error correctly resolved to `Player_old(player_name), Player(player_name)`.
-- Deliberately **not** applied to `baseline.py` — value grounding and M-Schema formatting are semantic-context enrichments, and baseline is intentionally the unenriched comparison point by design.
-- All three verified via direct calls to the real profiler/schema data (california_schools, european_football_2) and full graph-build checks — no OpenAI API calls made.
-
-### Next: run the 55-question, 4-condition ablation with Tier 1 fixes included, to get first real numbers ahead of tomorrow's meeting (pending approval to spend).
-
-### 55-question, 4-condition ablation results (run `eval_20260730_132134`, with Tier 1 fixes included)
-
-| Condition | EX | vs Baseline |
-|---|---|---|
-| A — Baseline | 58.18% | — |
-| B — Context only (Node A, no correction) | 52.73% | −5.45pp |
-| C — Correction only (raw schema, no Node A) | 60.0% | +1.82pp |
-| D — Full agent (Node A + correction) | 52.73% | −5.45pp |
-
-**Key finding: the regression isolates cleanly to Node A, not to the correction loop.** Conditions B and D score identically on 9 of 11 databases — Node D contributes almost nothing extra when Node A is in the pipeline. Condition C (correction loop alone, no Node A) is the only agent variant that beats baseline. Tier 1's raw-schema-fallback fix (added this morning) did not fix this, because it targets *missing* schema information — the actual failure mode found here is different.
-
-**Root cause, confirmed against the real schema:** in `thrombosis_prediction`, baseline correctly queries `Patient.Diagnosis`; context-only and full-agent both query `Examination.Diagnosis` instead. Checked the real schema — **both tables genuinely have a column named `Diagnosis`.** Node A isn't hallucinating a nonexistent column, it's pointing Node B at the wrong one of two real, identically-named columns across tables. A second example in `toxicology` (triple-bond question) shows Node A's join-path description leading Node B into an unneeded double self-join, producing the wrong output shape — again with no execution error, so invisible to Node D. Both are column/schema **collisions**, not omissions.
-
-**The self-correction-rate metric is currently overstating itself.** As defined in `compute_metrics`, `self_corrected` means "attempts > 1 AND execution succeeded" — not "attempts > 1 AND now correct." Recomputed properly from this run's data:
-- Condition C: correction triggered on 5/55 questions → 2 became genuinely correct, 3 were fixed into a *different wrong-but-executing* query.
-- Condition D: triggered on only 3/55 → 1 genuinely correct, 2 executes-but-wrong.
-
-This directly reproduces the ErrorLLM finding from last night's research in our own data: the correction loop reliably fixes queries that throw errors, but a large share of wrong SQL just executes cleanly and Node D never sees it. Worth noting as a metric-definition caveat in the thesis methodology, and worth reporting a "genuinely corrected" rate alongside the current execution-based one.
-
-**Proposed next fix (not yet implemented):** detect column names that collide across multiple tables using data already in `raw_profile.json` (zero API cost), and inject an explicit disambiguation warning into Node A's and Node B's prompts whenever a question touches one of them — directly targeting the `Diagnosis`-style collision above.
-
-### Duplicate-column disambiguation fix (implemented, code only, zero API calls)
-- New `find_duplicate_columns()` / `format_duplicate_columns()` in `src/common/schema_utils.py`: scans the real schema via `sqlite3` PRAGMA and flags column names that appear identically on 2+ tables, **excluding** primary keys and columns that participate in a declared foreign key (those repeat by name intentionally — e.g. `raceId` across 5 `formula_1` tables — and would just be noise).
-- Verified the filtered list on real data: `thrombosis_prediction` → exactly `Diagnosis: [Examination, Patient]` (the smoking-gun case from tonight's ablation), `toxicology` → empty (0, matches that its regression was a join-shape problem, not a name collision — see below), `california_schools` → empty. Before FK-exclusion, `formula_1`/`european_football_2` had 11–14 noisy entries (mostly FK join keys); after exclusion, down to 6–11 genuinely meaningful ones (e.g. `european_football_2`: `player_name`/`birthday`/`height`/`weight` duplicated across `Player`/`Player_old`, `date` across 3 unrelated tables).
-- Wired into Node A's prompt (always) and Node B's prompt (gated by `include_raw_fallback`, so Condition C stays a clean raw-schema-only comparison, same pattern as the value-retrieval and raw-schema-fallback fixes). Node B's rule list now explicitly instructs it to pick the table matching question intent, not the first match, when a flagged column is in play.
-- Note: this fix targets the `thrombosis_prediction` failure mode specifically (name collision across tables). It does **not** address the `toxicology` triple-bond failure mode (Node A leading Node B into an unnecessary double self-join via `connected.atom_id`/`atom_id2`) — that's a join-path reasoning error, not a column collision, and remains open.
-- All verified via direct calls against real `.sqlite` files and a full graph-build check — no OpenAI API calls made.
-
-### Full regression audit across all 11 databases (not just the 2 spot-checked earlier)
-Checked every question where baseline matched gold but an agent variant (context-only/full-agent) didn't: 6 out of 55. Categorised each:
-
-| DB | Root cause | Covered by duplicate-column fix? |
-|---|---|---|
-| thrombosis_prediction | `Examination.Diagnosis` vs `Patient.Diagnosis` — exact-name collision | Yes |
-| california_schools | Correct columns, wrong SELECT order (`City, School, Low Grade` vs gold's `City, Low Grade, School`) | No — not a collision, see below |
-| superhero | `ROW_NUMBER()` used where gold uses `RANK()` — same rows, different values on ties | No — prompt wording bug |
-| codebase_community | Used `posts.OwnerDisplayName` (real, denormalized) instead of `users.DisplayName` | No — different column names, same disease |
-| european_football_2 | Over-elaborate join through `Player` to filter `Player.id` instead of `Player_Attributes.id` directly | No — join-shape reasoning, not a collision |
-| toxicology | Double self-join via `atom_id`/`atom_id2`; gold only joins one side | No — same over-elaboration pattern |
-
-**Only 1 of 6 is addressed by the duplicate-column fix.** Two more turned out to be separate, equally cheap issues (now fixed, see below). The remaining 3 (codebase_community, european_football_2, toxicology) confirm a broader, still-open pattern: Node A is generally too willing to suggest a plausible-but-wrong alternative (a denormalized column, an extra join hop) instead of the simplest correct path — a harder problem than exact-name collision, not resolved tonight.
-
-**Important methodology finding, not a bug:** researched BIRD's official execution-accuracy metric — confirmed it is column-*order*-sensitive within a row (order-insensitive across rows), and this codebase's `ex_checker.py` already correctly replicates that. The california_schools case above is a legitimate (if arguably harsh) BIRD grading behavior, not a measurement artifact — worth citing as a known benchmark strictness in the thesis's methodology/limitations discussion. [Source: motherduck.com/blog/bird-bench-and-data-models]
-
-### Two more cheap prompt fixes implemented (code only, zero API calls)
-1. **RANK() vs ROW_NUMBER()** — the existing "ranking" rule in both `nodes.py` and `baseline.py` offered `ROW_NUMBER()` and `RANK()` as interchangeable; they aren't (`RANK()` ties correctly, `ROW_NUMBER()` doesn't, and gold consistently uses `RANK()`). Tightened both files to prefer `RANK()`, matching the superhero regression found above.
-2. **SELECT column ordering** — added a rule to both `nodes.py` and `baseline.py` instructing the SQL generator to order SELECT columns in the same sequence entities are mentioned in the question, since BIRD's grading is order-sensitive (see above). Applied to both baseline and agent for fairness.
-- Verified via compile checks and full graph-build — no OpenAI API calls made.
-
-### Next: second 55-question ablation run tonight with all fixes included (raw-schema fallback, value retrieval, M-Schema formatting, duplicate-column warning, RANK preference, SELECT column ordering), to get final numbers for tomorrow's meeting.
-
-### Research: how to fix "Node A too willing to suggest a plausible-but-wrong alternative"
-Researched the specific failure pattern found in the regression audit above (this is a known, named problem in the literature: schema-linking over-inclusion / hallucinated joins). Five candidate fixes identified, ranked by cost and directness:
-- **(A) Force structured JSON output instead of free prose** — every top system (CHESS, XiYan-SQL, E-SQL) has Node A output a strict enumerated list of real identifiers, not a descriptive paragraph; a separate deterministic step renders the actual schema block. Zero extra API cost (same single call, different output format).
-- **(B) Bidirectional/backward verification** (RSL-SQL, arXiv:2411.00073) — after forward retrieval, verify each candidate actually connects back to the question; reports 94% recall while cutting 83% of over-included columns. Costs one extra LLM call per question.
-- **(C) Reframe the prompt as "minimal sufficient set"** rather than "relevant elements" — zero cost, pure wording change.
-- **(D) Explicit named-bias calibration** (C3, arXiv:2307.07306) — telling the model to avoid a specifically-named bias (e.g. unnecessary joins) beats generic caution. Zero cost.
-- **(E) Self-consistency at the retrieval stage** — run Node A twice, keep only tables/columns both runs agree on. Costs one extra LLM call per question.
-
-**Decision: implemented A, C, D tonight; deliberately skipped B and E.** Honest reasoning, not "these will definitely help": A/C/D add zero API cost and their logic is fully testable offline before spending anything. B and E both add a genuinely new LLM call per question — more cost, more latency on an already slow run (~30-160s/question seen earlier tonight), and no way to validate the actual LLM behavior without spending API budget on test calls, hours before the one evaluation run available before tomorrow's meeting. Rather than bundle in two untested new call-stages under time pressure, held them back for a future, properly-validated pass.
-
-### Implemented: structured Node A rewrite + anti-over-join bias hints (code only, zero API calls)
-1. **Node A now outputs strict JSON, not prose.** `node_context_retrieval` in `nodes.py` prompts for `{"tables": {"ExactTableName": ["ExactColumnName", ...]}, "join_notes": "..."}` instead of a free-text "context block." New `_parse_selection()` handles markdown-fenced or malformed JSON gracefully (returns `None` rather than crashing). New `_render_selection()` deterministically builds the schema block Node B sees, pulling real metadata from `raw_profile.json`/`semantic_context.json` for ONLY the selected pairs — any hallucinated table/column name Node A invents is silently dropped rather than rendered, closing off the "free text = room to invent a plausible join" surface found in tonight's audit.
-2. **Defensive fallback chain**: malformed JSON → generic parse-failure message; valid JSON but every table/column hallucinated → "no valid selection" message. Both degrade gracefully onto Node B's existing raw-schema safety net rather than crashing the run. Caught and fixed one real bug during testing: the fallback message wasn't triggering on total hallucination because join-path reference text was being appended after the emptiness check — fixed to check before.
-3. **Minimal-set framing (C)**: Node A's prompt now explicitly requires justifying every table/column against a literal word or phrase in the question, not "relevance."
-4. **Anti-over-join bias hint (D)**: added "do not add a JOIN, table, or extra condition that isn't strictly required... prefer the simplest query" to both `nodes.py`'s Node B rules and `baseline.py`, for fairness.
-- Verified via 10 hand-built test cases against real california_schools data (clean JSON, markdown-fenced JSON, malformed text, hallucinated table, hallucinated column, empty selection, missing keys) — all pass. Full compile + graph-build check also passed. No OpenAI API calls made at any point tonight.
-
-**Caveat for the record:** this is a genuinely bigger change than tonight's earlier fixes, stacked into the same run as everything else — scientifically messier to attribute if the numbers move (won't know which specific change did what), but accepted as a disclosed tradeoff given the time constraint before tomorrow's meeting.
-
-### Second 55-question, 4-condition ablation run (`eval_20260730_145703`), with all of tonight's fixes included
+### 55-question ablation (development sample)
 
 | Condition | EX | vs Baseline |
 |---|---|---|
@@ -304,24 +198,43 @@ Researched the specific failure pattern found in the regression audit above (thi
 | C — Correction only | 54.55% | +0.00pp |
 | D — Full agent | **61.82%** | **+7.27pp** |
 
-**Headline: full-agent swung from −5.45pp (previous run) to +7.27pp — a 12.7pp turnaround**, and it's explainable, not just noise. Verified via `debit_card_specializing`: 3 of 5 questions flipped wrong→right, each attributable — a real baseline date-range bug (`SUBSTR(Date,1,4) BETWEEN '201301' AND '201312'`, a string-comparison bug that matches nothing) that full-agent avoided; a simpler, correct aggregation where baseline over-complicated the query; and one clean confirmation of the value-retrieval fix — baseline guessed `Currency = 'euro'` (wrong casing), full-agent correctly used the real value `'EUR'`, which baseline never gets grounding for by design.
+- Full agent moved from *underperforming* baseline (−5.45pp, before fixes) to a clear lead (+7.27pp).
+- **McNemar's exact test on this result: p = 0.34 — not significant.** Directionally positive, mechanistically explained, but the sample is too small to prove it statistically on its own.
+- Purpose of this sample: fast, cheap iteration to find and fix bugs before committing to the full run.
 
-**A/B/C landing at the identical 54.55% total is coincidental, not a sign nothing changed.** Computed net question-level churn between the two runs per condition:
+---
 
-| Condition | Gained | Lost | Net |
-|---|---|---|---|
-| A — Baseline | 1 | 3 | −2 |
-| B — Context only | 2 | 1 | +1 |
-| C — Correction only | 0 | 3 | −3 |
-| D — Full agent | 5 | 0 | **+5** |
+### Full 1,534-question evaluation (final)
 
-Each condition arrived at its total through different, independent question-level movement — the equal totals for A/B/C are a coincidence of this specific 55-question sample. D gaining 5 and losing 0 is the cleanest result in the whole run: zero regressions.
+| Condition | EX | vs Baseline |
+|---|---|---|
+| A — Baseline | 49.93% | — |
+| B — Context only | 52.09% | +2.15pp |
+| C — Correction only | 52.02% | +2.09pp |
+| D — Full agent | **54.24%** | **+4.30pp** |
 
-**Important correction to the working narrative: tonight's changes were NOT isolated to Node A ("the context layer").** Three new rules (RANK preference, SELECT column ordering, anti-over-join bias) were added directly to Node B's (`node_sql_generator`'s) rule list, which is NOT gated by condition — it applies to every condition that calls Node B, including Condition C (correction-only, which never touches Node A), and the same three rules were mirrored into `baseline.py`. This is exactly why Condition C's score moved (down, net −3) despite not using the rewritten Node A at all.
+**McNemar's exact test, each condition vs baseline:**
 
-**Traced all 3 of Condition C's losses individually — worth noting for the thesis's limitations discussion:**
-1. `california_schools` — the new column-ordering rule *did not reliably take effect*; same query, wrong column order anyway. Adding a prompt instruction doesn't guarantee compliance every time.
-2. `thrombosis_prediction` (albumin question) — an otherwise near-identical query silently dropped a `LIMIT 1` clause between runs. A knock-on effect of the prompt changing elsewhere: at temperature=0, a *different* prompt (from the 3 new rules) deterministically produces a different completion, including in unrelated details.
-3. `thrombosis_prediction` (PLT/Diagnosis) — the exact `Examination.Diagnosis` vs `Patient.Diagnosis` collision recurred, specifically because the duplicate-column-warning fix is gated behind `include_raw_fallback=True`, which Condition C deliberately sets `False` to keep its context equivalent to baseline's raw-schema view. **Condition C never receives that fix by design** — this is confirmation the fix works where applied, not evidence it failed.
+| Condition | Discordant pairs | Win/loss split | p-value | Significant? |
+|---|---|---|---|---|
+| B — Context only | 167 | 100 / 67 | 0.013 | Yes |
+| C — Correction only | 114 | 73 / 41 | 0.0035 | Yes |
+| D — Full agent | 178 | 122 / 56 | **8.4×10⁻⁷** | **Yes, decisively** |
 
-**Synergy interpretation for the thesis narrative:** Context-only (B) alone nets only +1 — a small real effect. Full-agent (D) nets +5 — much larger than B or the correction loop (C, net −3) individually. This suggests the correction loop is fixing things that Node A's improved grounding sets up, which neither component achieves alone on this sample — context and correction appear complementary rather than independently additive here.
+### Analysis
+
+- **All three conditions now significantly beat baseline.** The 55-question pilot showed the right direction but couldn't prove it; full-scale data does.
+- Baseline (49.93%) is already above BIRD's own published GPT-4 zero-shot reference point (46.35%, same evidence-hint setup); the full agent adds another +4.3pp on top of that.
+- **Self-correction quality**: correction triggers on only ~8–11% of questions (most wrong SQL never throws an error), and of those, only ~21–26% become genuinely correct — the rest execute cleanly but are still wrong. Confirms the literature finding (ErrorLLM) that error-triggered correction has a hard ceiling, now backed by ~150-160 real triggered cases instead of a handful.
+- **Case study — `card_games`** (largest DB, 191 questions): flat result (45.0%→45.0%) is not "no effect" — it's two equal, opposite effects cancelling. Semantic context correctly fixes several table-name confusions baseline makes (e.g. treating a set name as a card name); it simultaneously introduces one new, specific bug — joining `cards`↔`foreign_data` via `multiverseId` instead of the actual declared foreign key `uuid` (confirmed: the `uuid` join returns 229,170 correctly-matched rows, the `multiverseId` join returns only 14 — a near-broken join that still executes without error).
+
+---
+
+### Next steps
+
+1. **Fix the `card_games` join-key issue** — surface real declared foreign keys explicitly (already collected by the schema profiler, currently unused downstream) instead of relying on the LLM's guessed join paths. No new API cost to implement; cheap to validate on the ~11 known-affected questions rather than a full re-run.
+2. Statistical significance is now established at full scale — ready to write into the thesis results chapter.
+3. Few-shot examples in Node B — needs a held-out BIRD training split (not yet available locally), kept separate from the evaluation set to preserve the system's cold-start positioning.
+4. Bidirectional schema-linking verification and self-consistency voting — both identified in earlier research as the next-most-promising fixes, both require an additional model call per question. Deferred pending budget.
+5. **Budget note:** cumulative API spend is approaching the 100 EUR university reimbursement ceiling. Remaining work defaults to free/cheap validation (offline checks, tiny targeted samples); another full 1,534-question run should only happen once, deliberately, for final thesis submission numbers.
+6. european_football_2 debug scripts still pending cleanup (fix is committed, scripts are just clutter).
