@@ -38,7 +38,7 @@ flowchart TD
     end
 
     subgraph D[Component 3: 4-Condition Ablation + Evaluation]
-        D1[Condition A — Baseline\nRaw schema only]
+        D1[Condition A — Baseline\nOne-shot GPT call\nraw schema only, no nodes\nbaseline.py] --> D5
         D2[Condition B — Context only\nNode A + B + C]
         D3[Condition C — Correction only\nRaw schema + B + C + D]
         D4[Condition D — Full Agent\nAll 4 nodes]
@@ -48,7 +48,6 @@ flowchart TD
 
     A --> D1
     C --> D4
-    D1 --> D5
     D2 --> D5
     D3 --> D5
     D4 --> D5
@@ -65,6 +64,8 @@ Isolates the contribution of semantic context (Node A) and self-correction (Node
 | B — Context only | ✓ | — | Does documentation alone help? |
 | C — Correction only | — | ✓ | Does retry-on-failure alone help? |
 | D — Full agent | ✓ | ✓ | The complete system |
+
+Baseline still involves an LLM call to generate SQL — it's just a single, standalone one-shot prompt (`src/evaluator/baseline.py`), not the multi-node LangGraph pipeline. Conditions B/C/D reuse the same Node A–D functions in different combinations (`src/agent/graph.py`); Condition C substitutes a raw-schema loader for Node A so its context stays comparable to the baseline.
 
 ---
 
